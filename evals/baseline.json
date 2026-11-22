@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "variant": "baseline",
+  "golden_set": "data/wealthpilot/eval/golden_set.json",
+  "golden_set_count": 20,
+  "components": {
+    "intake": {
+      "status": "completed",
+      "source": "data/wealthpilot/intake/records.jsonl",
+      "records": 142,
+      "schema_valid": 142,
+      "dscr_consistent": 142,
+      "missing_fields_consistent": 142,
+      "checks_passed": 426,
+      "checks_total": 426,
+      "intake_consistency": 1.0,
+      "accuracy": 1.0,
+      "failure_count": 0,
+      "failures": []
+    },
+    "retrieval": {
+      "status": "corpus_coverage_only",
+      "expected_source_mentions": 35,
+      "source_mentions_found": 35,
+      "corpus_coverage": 1.0
+    },
+    "routing": {
+      "status": "not_run",
+      "expected_routes": 20,
+      "reason": "No candidate_outputs.jsonl route fields were supplied"
+    },
+    "guardrails": {
+      "blocked": 0,
+      "total": 8,
+      "block_rate": 0.0
+    },
+    "matched_pairs": {
+      "status": "fixture_validation",
+      "pairs": 3,
+      "structurally_valid": 3,
+      "fixture_accuracy": 1.0,
+      "candidate_status": "not_run: candidate_outputs.jsonl is missing"
+    }
+  },
+  "llm_judge": {
+    "status": "not_requested"
+  },
+  "change_under_test": "Guardrail enforcement disabled for baseline comparison"
+}

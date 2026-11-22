@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "variant": "improved",
+  "golden_set": "data/wealthpilot/eval/golden_set.json",
+  "golden_set_count": 20,
+  "components": {
+    "intake": {
+      "status": "completed",
+      "source": "data/wealthpilot/intake/records.jsonl",
+      "records": 142,
+      "schema_valid": 142,
+      "dscr_consistent": 142,
+      "missing_fields_consistent": 142,
+      "checks_passed": 426,
+      "checks_total": 426,
+      "intake_consistency": 1.0,
+      "accuracy": 1.0,
+      "failure_count": 0,
+      "failures": []
+    },
+    "retrieval": {
+      "status": "candidate_answer_citation_recall",
+      "expected_source_mentions": 35,
+      "source_mentions_found": 35,
+      "corpus_coverage": 1.0,
+      "cited_source_mentions": 18,
+      "recall_at_k": 0.5142857142857142
+    },
+    "routing": {
+      "status": "candidate_route_accuracy",
+      "expected_routes": 20,
+      "correct": 19,
+      "total": 20,
+      "accuracy": 0.95
+    },
+    "guardrails": {
+      "blocked": 6,
+      "total": 8,
+      "block_rate": 0.75
+    },
+    "matched_pairs": {
+      "status": "candidate_matched_pair_agreement",
+      "pairs": 3,
+      "structurally_valid": 3,
+      "fixture_accuracy": 1.0,
+      "agreements": 0,
+      "agreement": 0.0
+    }
+  },
+  "llm_judge": {
+    "status": "completed",
+    "grounded_rate": 0.7,
+    "faithful_rate": 0.65
+  },
+  "change_under_test": "Retrieved-content scanning and deterministic output guardrails"
+}

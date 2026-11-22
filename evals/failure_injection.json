@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "scenario": "two seeded transient failures followed by recovery",
+  "before_hardening": {
+    "success_rate": 0.0,
+    "attempts": 1
+  },
+  "after_hardening": {
+    "success_rate": 1.0,
+    "attempts": 3,
+    "used_fallback": false,
+    "breaker_state": "CLOSED"
+  }
+}
