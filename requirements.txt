@@ -10,7 +10,7 @@ fastembed==0.9.1
 
 # LLM, Agent & RAG Stack
 litellm[mcp]==1.109.1
-mcp==1.26.0
+mcp>=1.26.0,<3.0.0
 langchain==1.5.0
 langchain-core==1.8.4
 langchain-community==0.4.2
