@@ -50,7 +50,7 @@ cp .env.example .env
 .venv/bin/python -c "from src.rag import build_index; print(build_index())"
 ```
 
-Populate `.env` with the provider key used for live LLM calls. The default configuration is Gemini with an optional fallback of Groq. Local runs use the MCP in-process protocol transport by default; set `MCP_TRANSPORT=stdio` when a separate MCP process is required.
+Populate `.env` with the provider key used for live LLM calls. The default configuration is Gemini with an optional fallback of Groq. Local runs use the MCP in-process protocol transport by default; set `MCP_TRANSPORT=stdio` when a separate MCP process is required. MCP requests use `MCP_TIMEOUT_SECONDS` (10 seconds by default).
 
 Langfuse is optional for local execution, but the committed integration is enabled automatically when `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are present.
 
@@ -144,7 +144,7 @@ The committed result files are:
 
 ### M1 Provider-agnostic LLM client and structured intake
 
-- `src/llm_client.py` is the provider-agnostic LiteLLM adapter. Model, provider, API key, base URL, temperature, token limit, timeout, and fallback settings are read from `src/config.py` and environment variables.
+- `src/llm_client.py` is the provider-agnostic LiteLLM adapter. The default Gemini model is `gemini-flash-lite-latest`. 429 quota/rate-limit and 5xx provider failures are explicitly classified for the UI and routed to review without consuming the full revision budget.
 - `src/schemas.py` defines the typed `LoanApplication` and related decision models. Structured responses are validated with Pydantic and sent through a bounded repair loop in `generate_structured`.
 - `src/graph.py` consumes validated fields and structured outputs rather than raw model text.
 - Relevant checks: `tests/test_config.py`, `tests/test_llm_client.py`, `tests/test_schemas.py`, and `tests/test_graph.py`.
@@ -152,6 +152,7 @@ The committed result files are:
 ### M2 Tool-enabled single-agent capability
 
 - `src/tools.py` contains typed deterministic underwriting tools for DSCR, financial ratios, bureau data, bank statements, policy limits, FX conversion, and decision support.
+- DSCR is calculated only from an explicit application debt-service amount or application interest rate. If neither basis is present, DSCR remains unavailable rather than being fabricated, and the case is routed for review.
 - `src/mcp_server.py` exposes domain tools with typed parameters, docstrings, structured return values, validation, structured errors, timeouts, retries, and circuit-breaker protection.
 - Iteration and graph recursion are bounded through named configuration values.
 - Relevant checks: `tests/test_tools.py`, `tests/test_mcp_server.py`, `tests/test_graph.py`, and `evals/failure_injection.json`.
@@ -160,7 +161,7 @@ The committed result files are:
 
 - `src/memory.py` implements working, episodic, semantic, and procedural memory in SQLite with user/entity namespacing and restart persistence.
 - `src/graph.py` integrates memory with underwriting so retrieved facts and procedures are available to the workflow rather than stored as disconnected records.
-- `src/rag.py` builds the Qdrant semantic index over the committed policy corpus, with metadata payloads.
+- `src/rag.py` builds the Qdrant semantic index over the committed policy corpus, with metadata payloads. Local Qdrant is intentionally used in single-process mode; no Qdrant server is required.
 - Relevant checks: `tests/test_memory.py`, `tests/test_memory_restart.py`, and `tests/test_rag.py`.
 
 ### M4 Production RAG and evaluation baseline
@@ -200,7 +201,7 @@ The committed result files are:
 - Final committee rationales are canonicalized from sanitized financial facts and valid policy sources, so matched applicants receive identical rationale content when only demographic proxies differ.
 - `app.py` provides FastAPI `/health`, `/underwrite`, `/underwrite/resume`, and `/policy/query` endpoints with explicit 4xx guardrail responses.
 - `ARCHITECTURE.md` documents components, data flow, failure modes, evaluation, guardrail coverage, known gaps, and deployment notes.
-- Pinned dependencies, `.env.example`, test data, evaluation artifacts, and reproducible commands are committed for clean-clone evaluation.
+- Pinned dependencies, `.env.example`, test data, evaluation artifacts, `pytest.ini`, and reproducible commands are committed for clean-clone evaluation.
 
 ## Repository layout
 

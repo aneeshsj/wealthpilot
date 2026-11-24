@@ -139,7 +139,6 @@ def mock_api_dir(tmp_path: Path, tools_module: ModuleType) -> Path:
             "risk_grade",
             "requested_amount_inr",
             "requested_tenor_months",
-            "indicative_rate_pct",
             "ebitda_inr",
             "existing_annual_debt_service_inr",
             "proposed_annual_debt_service_inr",
@@ -156,7 +155,6 @@ def mock_api_dir(tmp_path: Path, tools_module: ModuleType) -> Path:
                 "risk_grade": "A",
                 "requested_amount_inr": "10000000",
                 "requested_tenor_months": "48",
-                "indicative_rate_pct": "11.0",
                 "ebitda_inr": "9000000",
                 "existing_annual_debt_service_inr": "1500000",
                 "proposed_annual_debt_service_inr": "3100000",
@@ -172,7 +170,6 @@ def mock_api_dir(tmp_path: Path, tools_module: ModuleType) -> Path:
                 "risk_grade": "B",
                 "requested_amount_inr": "15000000",
                 "requested_tenor_months": "72",
-                "indicative_rate_pct": "",
                 "ebitda_inr": "5000000",
                 "existing_annual_debt_service_inr": "2000000",
                 "proposed_annual_debt_service_inr": "",
@@ -188,7 +185,6 @@ def mock_api_dir(tmp_path: Path, tools_module: ModuleType) -> Path:
                 "risk_grade": "C",
                 "requested_amount_inr": "60000000",
                 "requested_tenor_months": "36",
-                "indicative_rate_pct": "13.5",
                 "ebitda_inr": "18000000",
                 "existing_annual_debt_service_inr": "4000000",
                 "proposed_annual_debt_service_inr": "24000000",
@@ -204,7 +200,6 @@ def mock_api_dir(tmp_path: Path, tools_module: ModuleType) -> Path:
                 "risk_grade": "A",
                 "requested_amount_inr": "5000000",
                 "requested_tenor_months": "36",
-                "indicative_rate_pct": "11.0",
                 "ebitda_inr": "4000000",
                 "existing_annual_debt_service_inr": "500000",
                 "proposed_annual_debt_service_inr": "1500000",
@@ -270,23 +265,20 @@ def mock_api_dir(tmp_path: Path, tools_module: ModuleType) -> Path:
     write_csv(
         api_dir,
         "risk_grades.csv",
-        ["risk_grade", "indicative_rate_pct", "max_tenor_months", "min_collateral_coverage_ratio"],
+        ["risk_grade", "max_tenor_months", "min_collateral_coverage_ratio"],
         [
             {
                 "risk_grade": "A",
-                "indicative_rate_pct": "10.5",
                 "max_tenor_months": "60",
                 "min_collateral_coverage_ratio": "1.10",
             },
             {
                 "risk_grade": "B",
-                "indicative_rate_pct": "12.0",
                 "max_tenor_months": "48",
                 "min_collateral_coverage_ratio": "1.15",
             },
             {
                 "risk_grade": "C",
-                "indicative_rate_pct": "14.0",
                 "max_tenor_months": "36",
                 "min_collateral_coverage_ratio": "1.25",
             },
@@ -299,7 +291,6 @@ def mock_api_dir(tmp_path: Path, tools_module: ModuleType) -> Path:
         ["parameter", "value"],
         [
             {"parameter": "dscr_formula", "value": "ebitda_inr / (existing_annual_debt_service_inr + proposed_annual_debt_service_inr)"},
-            {"parameter": "default_indicative_rate_pct", "value": "12.0"},
         ],
     )
 

@@ -76,7 +76,7 @@ def _configured_model() -> str:
         return explicit.strip()
     if _configured_provider() == "groq":
         return os.getenv("GROQ_API_MODEL", "openai/gpt-oss-120b")
-    return os.getenv("GEMINI_MODEL", "gemini/gemini-2.5-flash")
+    return os.getenv("GEMINI_MODEL", "gemini/gemini-flash-lite-latest")
 
 
 def _configured_api_key() -> str | None:
@@ -129,7 +129,7 @@ class Settings:
         repr=False,
     )
     GEMINI_MODEL: str = field(
-        default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini/gemini-2.5-flash")
+        default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini/gemini-flash-lite-latest")
     )
     GROQ_API_KEY: Optional[str] = field(
         default_factory=lambda: os.getenv("GROQ_API_KEY") or None,

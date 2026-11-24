@@ -110,7 +110,7 @@
   {
     "id": "WEALTHPILOT-EV-910",
     "question": "What rate would we indicate to a B2 applicant, what's the longest tenor we'd offer them, and how much collateral?",
-    "expected": "Grade B2 carries a spread of 350 basis points over the 9.50 percent base rate, an indicative rate of 13.00 percent. The maximum tenor is 60 months and the collateral cover required is 75 percent.",
+    "expected": "Grade B2 carries a spread of 350 basis points over the 9.50 percent base rate. The maximum tenor is 60 months and the collateral cover required is 75 percent.",
     "category": "factual",
     "must_cite": [
       "Internal Risk Grading and Pricing Grid"

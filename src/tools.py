@@ -248,6 +248,26 @@ def _extract_underwriting_defaults(rows: list[dict[str, str]]) -> dict[str, Any]
     return ref
 
 
+def derive_risk_grade(*, dscr: Any, bureau_score: Any) -> str:
+    """Derive the best qualifying risk grade from deterministic policy thresholds."""
+    try:
+        rows = _load_csv_rows("risk_grades.csv")
+    except FileNotFoundError:
+        return "UNAVAILABLE"
+    if dscr is None or bureau_score is None:
+        return "UNAVAILABLE"
+    dscr_value = _to_float(dscr, default=-1.0)
+    bureau_value = _to_float(bureau_score, default=-1.0)
+    ranked = sorted(rows, key=lambda row: _to_float(row.get("min_dscr"), -1.0), reverse=True)
+    for row in ranked:
+        if (
+            dscr_value >= _to_float(row.get("min_dscr"), 0.0)
+            and bureau_value >= _to_float(row.get("min_bureau_score"), 0.0)
+        ):
+            return _get_first_value(row, ("grade", "risk_grade", "grade_code"), "UNAVAILABLE")
+    return "D2"
+
+
 @tool
 def calculate_dscr_and_ratios(application_id: str) -> dict[str, Any]:
     """Calculate exact DSCR, financial ratios, and policy breach flags for an SME loan application.
@@ -340,40 +360,36 @@ def calculate_dscr_and_ratios(application_id: str) -> dict[str, Any]:
         _get_first_value(app_row, ("requested_tenor_months", "tenor_months", "tenure_months"))
     )
 
-    indicative_rate_pct = _to_float(
-        _get_first_value(app_row, ("indicative_rate_pct", "interest_rate_pct", "rate_pct"))
-        or (
-            _get_first_value(
-                grade_row,
-                ("indicative_rate_pct", "interest_rate_pct", "rate_pct", "base_rate_pct"),
-            )
-            if grade_row
-            else ""
-        )
-        or str(underwriting_ref.get("default_indicative_rate_pct", underwriting_ref.get("indicative_rate_pct", "0")))
-    )
-
+    raw_rate = _get_first_value(app_row, ("interest_rate_pct", "annual_rate_pct", "rate_pct"))
+    interest_rate_pct: float | None = _to_float(raw_rate) if raw_rate else None
     explicit_proposed_debt_service = _to_float(
         _get_first_value(app_row, ("proposed_annual_debt_service_inr", "proposed_debt_service_inr"))
     )
-    derived_monthly_emi = _calculate_monthly_emi(
-        requested_amount_inr,
-        indicative_rate_pct,
-        requested_tenor_months,
-    )
-    derived_proposed_annual_debt_service = derived_monthly_emi * 12.0
+    derived_proposed_annual_debt_service: float | None = None
+    if interest_rate_pct is not None:
+        derived_monthly_emi = _calculate_monthly_emi(
+            requested_amount_inr, interest_rate_pct, requested_tenor_months
+        )
+        derived_proposed_annual_debt_service = derived_monthly_emi * 12.0
 
     if explicit_proposed_debt_service > 0.0:
         proposed_annual_debt_service_inr = explicit_proposed_debt_service
         proposed_debt_service_source = "loan_applications.proposed_annual_debt_service_inr"
-    else:
+    elif derived_proposed_annual_debt_service is not None:
         proposed_annual_debt_service_inr = derived_proposed_annual_debt_service
-        proposed_debt_service_source = "underwriting_reference_emi_formula"
+        proposed_debt_service_source = "loan_applications.interest_rate_pct_emi_formula"
+    else:
+        proposed_annual_debt_service_inr = None
+        proposed_debt_service_source = "missing_application_debt_service_basis"
 
-    total_annual_debt_service_inr = existing_annual_debt_service_inr + proposed_annual_debt_service_inr
+    total_annual_debt_service_inr = (
+        existing_annual_debt_service_inr + proposed_annual_debt_service_inr
+        if proposed_annual_debt_service_inr is not None
+        else None
+    )
     dscr: float | None = (
         round(ebitda_inr / total_annual_debt_service_inr, 4)
-        if total_annual_debt_service_inr > 0.0
+        if total_annual_debt_service_inr is not None and total_annual_debt_service_inr > 0.0
         else None
     )
 
@@ -507,10 +523,17 @@ def calculate_dscr_and_ratios(application_id: str) -> dict[str, Any]:
         "risk_grade": risk_grade,
         "ebitda_inr": round(ebitda_inr, 2),
         "existing_annual_debt_service_inr": round(existing_annual_debt_service_inr, 2),
-        "proposed_annual_debt_service_inr": round(proposed_annual_debt_service_inr, 2),
-        "total_annual_debt_service_inr": round(total_annual_debt_service_inr, 2),
+        "proposed_annual_debt_service_inr": (
+            round(proposed_annual_debt_service_inr, 2)
+            if proposed_annual_debt_service_inr is not None
+            else None
+        ),
+        "total_annual_debt_service_inr": (
+            round(total_annual_debt_service_inr, 2)
+            if total_annual_debt_service_inr is not None
+            else None
+        ),
         "proposed_debt_service_source": proposed_debt_service_source,
-        "indicative_rate_pct": round(indicative_rate_pct, 4),
         "dscr": dscr,
         "dscr_floor": round(dscr_floor, 4),
         "meets_dscr_floor": meets_dscr_floor,

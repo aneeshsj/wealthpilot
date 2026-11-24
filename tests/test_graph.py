@@ -141,9 +141,7 @@ def _base_state(
         ],
         "draft_verdict": {
             "decision": decision,
-            "recommended_amount_inr": requested_amount_inr,
             "risk_grade": "A",
-            "proposed_interest_rate_pct": 11.25,
             "dscr_cited": dscr,
             "rationale": (
                 f"Applicant exhibits healthy DSCR of {dscr:.2f} and clean credit bureau history "
@@ -269,7 +267,6 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
                 "applicant_id": "APL-2001",
                 "sector": "manufacturing",
                 "requested_amount_inr": 2_500_000.0,
-                "indicative_rate_pct": 11.25,
                 "requested_tenor_months": 36,
                 "dscr": 1.65,
                 "dscr_floor": 1.25,
@@ -484,9 +481,7 @@ def test_committee_analyst_node_binds_only_analyst_tools_and_wraps_context(
 ) -> None:
     verdict = DraftVerdictOutput(
         decision="approve",
-        recommended_amount_inr=2_500_000.0,
         risk_grade="A",
-        proposed_interest_rate_pct=11.0,
         dscr_cited=1.65,
         rationale=(
             "Strong DSCR 1.65 per [Core Credit Policy | DSCR Thresholds] and "
@@ -707,9 +702,7 @@ def test_compiled_graph_uses_recursion_limit_25_and_auto_finalizes_clean_app(
 ) -> None:
     analyst_verdict = DraftVerdictOutput(
         decision="approve",
-        recommended_amount_inr=2_500_000.0,
         risk_grade="A",
-        proposed_interest_rate_pct=11.0,
         dscr_cited=1.65,
         rationale=(
             "Compliant per [Core Credit Policy | DSCR Thresholds], "
@@ -767,9 +760,7 @@ def test_compiled_graph_interrupts_before_finalize_and_resumes_after_human_signo
 ) -> None:
     analyst_verdict = DraftVerdictOutput(
         decision="borderline",
-        recommended_amount_inr=7_500_000.0,
         risk_grade="B",
-        proposed_interest_rate_pct=12.5,
         dscr_cited=1.65,
         rationale=(
             "Borderline leverage profile under [Core Credit Policy | DSCR Thresholds] "
@@ -828,7 +819,6 @@ def test_compiled_graph_interrupts_before_finalize_and_resumes_after_human_signo
                 resume={
                     "approved": True,
                     "override_decision": "approve",
-                    "approved_amount_inr": 6_000_000.0,
                     "reviewer": "vp_credit",
                     "notes": "Approved at reduced sanction limit.",
                 }
@@ -837,18 +827,15 @@ def test_compiled_graph_interrupts_before_finalize_and_resumes_after_human_signo
         )
 
     assert resumed_state["final_decision"]["decision"] == "approve"
-    assert resumed_state["final_decision"]["recommended_amount_inr"] == pytest.approx(
-        6_000_000.0
-    )
     assert resumed_state["human_approval"]["reviewer"] == "vp_credit"
 
     with sqlite3.connect(isolated_env) as conn:
         saved = conn.execute(
-            "SELECT decision, recommended_amount_inr, human_approved, human_reviewer_notes "
+            "SELECT decision, human_approved, human_reviewer_notes "
             "FROM past_decisions WHERE application_id = ?",
             ("APP-E2E-HITL",),
         ).fetchone()
-    assert saved == ("approve", 6_000_000.0, 1, "Approved at reduced sanction limit.")
+    assert saved == ("approve", 1, "Approved at reduced sanction limit.")
 
 
 def test_compiled_graph_loops_critic_to_analyst_up_to_max_revisions(
@@ -857,9 +844,7 @@ def test_compiled_graph_loops_critic_to_analyst_up_to_max_revisions(
 ) -> None:
     bad_verdict = DraftVerdictOutput(
         decision="approve",
-        recommended_amount_inr=2_500_000.0,
         risk_grade="A",
-        proposed_interest_rate_pct=11.0,
         dscr_cited=2.99,  # Wrong DSCR triggers deterministic critic rejection
         rationale="DSCR reported as 2.99.",
         cited_rule_ids=["[Core Credit Policy | DSCR Thresholds]"],
@@ -867,9 +852,7 @@ def test_compiled_graph_loops_critic_to_analyst_up_to_max_revisions(
     )
     good_verdict = DraftVerdictOutput(
         decision="approve",
-        recommended_amount_inr=2_500_000.0,
         risk_grade="A",
-        proposed_interest_rate_pct=11.0,
         dscr_cited=1.65,
         rationale=(
             "Corrected DSCR 1.65 aligned with [Core Credit Policy | DSCR Thresholds] "

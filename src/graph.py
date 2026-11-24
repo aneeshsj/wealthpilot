@@ -12,6 +12,7 @@ import json
 import logging
 import operator
 import sqlite3
+import time
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from typing import Annotated, Any, Final, Iterator, Literal, TypedDict, cast
@@ -40,6 +41,7 @@ try:
         analyze_bank_statements,
         calculate_dscr_and_ratios,
         convert_fx_and_interest,
+        derive_risk_grade,
         escalate_to_human,
         lookup_credit_bureau,
     )
@@ -60,6 +62,7 @@ except ImportError:  # pragma: no cover - supports running with src/ on sys.path
         analyze_bank_statements,
         calculate_dscr_and_ratios,
         convert_fx_and_interest,
+        derive_risk_grade,
         escalate_to_human,
         lookup_credit_bureau,
     )
@@ -194,9 +197,7 @@ class DraftVerdictOutput(BaseModel):
     """Structured output contract for the committee analyst node."""
 
     decision: Literal["approve", "reject", "borderline"]
-    recommended_amount_inr: float = Field(ge=0.0)
     risk_grade: str
-    proposed_interest_rate_pct: float = Field(ge=0.0)
     dscr_cited: float = Field(ge=0.0)
     rationale: str
     # Required rather than optional: Groq's JSON-schema validator requires
@@ -356,28 +357,52 @@ def _invoke_committee_llm(
 
     last_error: Exception | None = None
     for attempt_name, model_factory in attempts:
-        try:
-            llm = model_factory()
-            conversation = _invoke_with_scoped_tools(llm, tools, messages)
-            conversation.append(
-                HumanMessage(
-                    content=(
-                        "Using the information and tool results above, return only the "
-                        "final response matching the requested structured output schema."
+        for retry_index in range(2):
+            try:
+                llm = model_factory()
+                conversation = _invoke_with_scoped_tools(llm, tools, messages)
+                conversation.append(
+                    HumanMessage(
+                        content=(
+                            "Using the information and tool results above, return only the "
+                            "final response matching the requested structured output schema."
+                        )
                     )
                 )
-            )
-            structured_llm = llm.with_structured_output(response_model)
-            result = cast(BaseModel, structured_llm.invoke(conversation))
-            if attempt_name != "primary":
-                logger.warning("Committee LLM primary failed; provider fallback succeeded: %s", attempt_name)
-            return result, attempt_name != "primary"
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            logger.warning("Committee LLM attempt failed (%s): %s", attempt_name, exc)
+                structured_llm = llm.with_structured_output(response_model)
+                result = cast(BaseModel, structured_llm.invoke(conversation))
+                if attempt_name != "primary":
+                    logger.warning("Committee LLM primary failed; provider fallback succeeded: %s", attempt_name)
+                return result, attempt_name != "primary"
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                logger.warning("Committee LLM attempt failed (%s): %s", attempt_name, exc)
+                error_text = str(exc).lower()
+                status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+                is_rate_limited = status_code == 429 or "429" in error_text or "rate limit" in error_text or "quota" in error_text
+                is_service_unavailable = status_code in {500, 502, 503, 504} or "503" in error_text or "service unavailable" in error_text or "high demand" in error_text
+                if is_rate_limited:
+                    logger.error("Committee LLM rate/quota limit reached; stopping retries for this request.")
+                    break
+                if is_service_unavailable and retry_index == 0:
+                    logger.warning("Committee LLM service unavailable; retrying once after a short backoff.")
+                    time.sleep(2.0)
+                    continue
+                break
 
     assert last_error is not None
     raise last_error
+
+
+def _llm_failure_flag(exc: Exception) -> str:
+    """Classify provider failures so the UI can explain actionable outages."""
+    text = str(exc).lower()
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if status == 429 or "429" in text or "rate limit" in text or "quota" in text:
+        return "llm_rate_limited"
+    if status in {500, 502, 503, 504} or "503" in text or "service unavailable" in text or "high demand" in text:
+        return "llm_service_unavailable"
+    return "llm_unavailable_human_review"
 
 
 def _normalize_policy_entry(
@@ -630,11 +655,6 @@ def _deterministic_analyst_fallback(scope: _AnalystScope) -> DraftVerdictOutput:
     """Rule-based underwriting fallback when the analyst LLM is unavailable."""
     dscr = _safe_float(scope["dscr_metrics"].get("dscr"), default=0.0)
     bureau_score = int(_safe_float(scope["bureau_data"].get("bureau_score"), default=0.0))
-    requested_amount = _safe_float(
-        scope["sanitized_app"].get("requested_amount_inr")
-        or scope["dscr_metrics"].get("requested_amount_inr"),
-        default=0.0,
-    )
     citation_ids = [
         str(c.get("citation") or c.get("rule_id") or c.get("id") or c.get("chunk_id"))
         for c in scope["policy_citations"]
@@ -644,7 +664,6 @@ def _deterministic_analyst_fallback(scope: _AnalystScope) -> DraftVerdictOutput:
     if dscr >= 1.35 and bureau_score >= 720:
         decision: Literal["approve", "reject", "borderline"] = "borderline"
         risk_grade = "B"
-        rate = 12.25
         rationale = (
             "Deterministic fallback recommendation: financials meet baseline DSCR "
             f"({dscr:.2f}) and bureau score ({bureau_score}); escalated as borderline "
@@ -653,7 +672,6 @@ def _deterministic_analyst_fallback(scope: _AnalystScope) -> DraftVerdictOutput:
     elif dscr < 1.0 or bureau_score < 620:
         decision = "reject"
         risk_grade = "D"
-        rate = 0.0
         rationale = (
             "Deterministic fallback recommendation: insufficient DSCR "
             f"({dscr:.2f}) or weak credit bureau profile ({bureau_score})."
@@ -661,7 +679,6 @@ def _deterministic_analyst_fallback(scope: _AnalystScope) -> DraftVerdictOutput:
     else:
         decision = "borderline"
         risk_grade = "C"
-        rate = 14.0
         rationale = (
             "Deterministic fallback recommendation: intermediate DSCR "
             f"({dscr:.2f}) and bureau score ({bureau_score}) require credit "
@@ -670,9 +687,7 @@ def _deterministic_analyst_fallback(scope: _AnalystScope) -> DraftVerdictOutput:
 
     return DraftVerdictOutput(
         decision=decision,
-        recommended_amount_inr=requested_amount if decision != "reject" else 0.0,
         risk_grade=risk_grade,
-        proposed_interest_rate_pct=rate,
         dscr_cited=round(dscr, 4),
         rationale=rationale,
         cited_rule_ids=citation_ids,
@@ -976,11 +991,6 @@ def risk_scoring_node(state: UnderwritingState) -> dict[str, Any]:
             or sanitized_app.get("requested_amount_inr"),
             default=0.0,
         )
-        rate_pct = _safe_float(
-            dscr_metrics.get("indicative_rate_pct")
-            or sanitized_app.get("indicative_rate_pct"),
-            default=0.0,
-        )
         tenor_months = int(
             _safe_float(
                 dscr_metrics.get("requested_tenor_months")
@@ -994,7 +1004,7 @@ def risk_scoring_node(state: UnderwritingState) -> dict[str, Any]:
                 {
                     "usd_amount": usd_receivables,
                     "principal_inr": principal_inr,
-                    "annual_rate_pct": rate_pct,
+                    "annual_rate_pct": 0.0,
                     "tenor_months": tenor_months,
                 }
             )
@@ -1008,6 +1018,12 @@ def risk_scoring_node(state: UnderwritingState) -> dict[str, Any]:
             {"pan_or_entity_id": applicant_id, "business_name": "", "vintage_years": 0.0},
         )
     bank_data = analyze_bank_statements.invoke({"applicant_id": applicant_id})
+
+    if not str(dscr_metrics.get("risk_grade") or "").strip():
+        dscr_metrics["risk_grade"] = derive_risk_grade(
+            dscr=dscr_metrics.get("dscr"),
+            bureau_score=bureau_data.get("bureau_score"),
+        )
 
     tool_policy_flags = [str(f) for f in (dscr_metrics.get("policy_flags") or []) if f]
     added_flags = list(tool_policy_flags)
@@ -1121,6 +1137,7 @@ def committee_analyst_node(state: UnderwritingState) -> dict[str, Any]:
             exc,
             _fallback_enabled(),
         )
+        flags = _dedupe_flags(flags, [_llm_failure_flag(exc)])
         if _fallback_enabled():
             verdict = _deterministic_analyst_fallback(scope)
             used_fallback = True
@@ -1128,9 +1145,7 @@ def committee_analyst_node(state: UnderwritingState) -> dict[str, Any]:
         else:
             verdict = DraftVerdictOutput(
                 decision="borderline",
-                recommended_amount_inr=0.0,
                 risk_grade="UNAVAILABLE",
-                proposed_interest_rate_pct=0.0,
                 dscr_cited=_safe_float(scope["dscr_metrics"].get("dscr"), default=0.0),
                 rationale=(
                     "No automated recommendation was generated because the configured "
@@ -1139,8 +1154,11 @@ def committee_analyst_node(state: UnderwritingState) -> dict[str, Any]:
                 cited_rule_ids=[],
                 conditions=["LLM unavailable; manual credit officer review required."],
             )
-            flags = _dedupe_flags(flags, ["llm_unavailable_human_review"])
+            flags = _dedupe_flags(flags, [_llm_failure_flag(exc)])
 
+    deterministic_grade = str(scope["dscr_metrics"].get("risk_grade") or "").strip()
+    if deterministic_grade:
+        verdict.risk_grade = deterministic_grade
     verdict = _canonicalize_verdict(scope, verdict)
     draft_dict = verdict.model_dump(mode="json")
     handoff = create_analyst_handoff(
@@ -1159,7 +1177,6 @@ def committee_analyst_node(state: UnderwritingState) -> dict[str, Any]:
                 "committee_analyst_node",
                 (
                     f"Drafted verdict='{draft_dict['decision']}' "
-                    f"amount={draft_dict['recommended_amount_inr']} "
                     f"(revision={next_revision_count}, fallback={used_fallback})."
                 ),
             )
@@ -1236,6 +1253,7 @@ def committee_critic_node(state: UnderwritingState) -> dict[str, Any]:
             scope["application_id"],
             exc,
         )
+        flags = _dedupe_flags(flags, [_llm_failure_flag(exc)])
         if _fallback_enabled():
             used_fallback = True
             flags = _dedupe_flags(flags, ["critic_llm_fallback"])
@@ -1413,9 +1431,6 @@ def human_approval_node(state: UnderwritingState) -> dict[str, Any]:
     elif not approved:
         final_verdict["decision"] = "reject"
 
-    if "approved_amount_inr" in response_dict:
-        final_verdict["recommended_amount_inr"] = float(response_dict["approved_amount_inr"])
-
     approval_record = {
         "required": True,
         "approved": approved,
@@ -1470,7 +1485,6 @@ def _write_past_decision(
                 sector TEXT NOT NULL,
                 requested_amount_inr REAL NOT NULL,
                 decision TEXT NOT NULL,
-                recommended_amount_inr REAL NOT NULL,
                 dscr REAL NOT NULL,
                 bureau_score INTEGER NOT NULL,
                 rationale TEXT NOT NULL,
@@ -1492,7 +1506,6 @@ def _write_past_decision(
                 sector,
                 requested_amount_inr,
                 decision,
-                recommended_amount_inr,
                 dscr,
                 bureau_score,
                 rationale,
@@ -1504,12 +1517,11 @@ def _write_past_decision(
                 audit_trail_json,
                 created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(application_id) DO UPDATE SET
                 sector = excluded.sector,
                 requested_amount_inr = excluded.requested_amount_inr,
                 decision = excluded.decision,
-                recommended_amount_inr = excluded.recommended_amount_inr,
                 dscr = excluded.dscr,
                 bureau_score = excluded.bureau_score,
                 rationale = excluded.rationale,
@@ -1526,7 +1538,6 @@ def _write_past_decision(
                 record["sector"],
                 record["requested_amount_inr"],
                 record["decision"],
-                record["recommended_amount_inr"],
                 record["dscr"],
                 record["bureau_score"],
                 record["rationale"],
@@ -1550,7 +1561,6 @@ def finalize_decision_node(state: UnderwritingState) -> dict[str, Any]:
     now_iso = _utc_timestamp()
 
     decision_str = str(final_verdict.get("decision", "reject"))
-    recommended_amt = _safe_float(final_verdict.get("recommended_amount_inr"), default=0.0)
     requested_amt = _safe_float(scope["sanitized_app"].get("requested_amount_inr"), default=0.0)
     sector = str(scope["sanitized_app"].get("sector") or "unknown")
     dscr_val = _safe_float(scope["dscr_metrics"].get("dscr"), default=0.0)
@@ -1566,7 +1576,6 @@ def finalize_decision_node(state: UnderwritingState) -> dict[str, Any]:
         "sector": sector,
         "requested_amount_inr": requested_amt,
         "decision": decision_str,
-        "recommended_amount_inr": recommended_amt,
         "dscr": dscr_val,
         "bureau_score": bureau_score,
         "rationale": rationale,
@@ -1647,6 +1656,10 @@ def route_after_critic(
     approved = bool(feedback.get("approved", False))
     revision_count = int(state.get("revision_count", 0))
     max_revisions = int(getattr(settings, "MAX_GRAPH_REVISIONS", 3))
+    flags = {str(flag) for flag in state.get("guardrail_flags", [])}
+
+    if {"llm_unavailable_human_review", "critic_llm_unavailable_human_review"} & flags:
+        return "human_approval_node"
 
     if not approved and revision_count < max_revisions:
         return "committee_analyst_node"

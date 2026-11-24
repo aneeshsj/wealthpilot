@@ -116,8 +116,10 @@ async def _request(kind: str, **kwargs: Any) -> dict[str, Any]:
 
 def _run(coro: Any, *, fallback: Any = None) -> dict[str, Any]:
     try:
+        timeout_seconds = float(os.getenv("MCP_TIMEOUT_SECONDS", "10"))
+
         async def bounded() -> dict[str, Any]:
-            return await asyncio.wait_for(coro, timeout=2.0)
+            return await asyncio.wait_for(coro, timeout=timeout_seconds)
 
         return asyncio.run(bounded())
     except (TimeoutError, asyncio.TimeoutError) as exc:

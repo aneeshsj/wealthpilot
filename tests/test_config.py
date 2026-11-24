@@ -34,7 +34,7 @@ def clean_env(monkeypatch):
 
 def test_default_settings(clean_env):
     s = config.Settings()
-    assert s.LLM_MODEL == "gemini/gemini-2.5-flash"
+    assert s.LLM_MODEL == "gemini/gemini-flash-lite-latest"
     assert s.EMBEDDING_MODEL == "models/text-embedding-004"
     assert s.GEMINI_API_KEY is None
     assert s.DATA_DIR == "data/wealthpilot"

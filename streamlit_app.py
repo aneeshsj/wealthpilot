@@ -309,6 +309,11 @@ def _render_underwriting_result(result: dict[str, Any], thread_id: str | None) -
     flags = result.get("guardrail_flags") or []
     decision = final.get("decision") or draft.get("decision") or "pending"
 
+    if "llm_rate_limited" in flags:
+        st.error("The configured Gemini model rate limit or quota was reached (HTTP 429). Please wait and retry.")
+    elif "llm_service_unavailable" in flags:
+        st.error("The configured Gemini model is temporarily unavailable (HTTP 503). Please retry shortly.")
+
     st.divider()
     st.markdown("### Credit assessment")
     assessment_card, decision_card = st.columns(2, gap="large")
@@ -316,27 +321,26 @@ def _render_underwriting_result(result: dict[str, Any], thread_id: str | None) -
         with st.container(border=True):
             st.markdown("#### Credit assessment")
             st.caption("Core financial and credit signals used by the committee.")
-            assessment_top = st.columns(2)
+            assessment_top = st.columns(4)
             assessment_top[0].metric(
                 "DSCR",
                 f"{dscr.get('dscr'):.2f}" if dscr.get("dscr") is not None else "—",
                 help="Debt service coverage ratio calculated by the deterministic risk tool.",
             )
             assessment_top[1].metric(
+                "Collateral coverage",
+                f"{float(dscr.get('collateral_coverage_ratio')):.2f}x" if isinstance(dscr.get("collateral_coverage_ratio"), (int, float)) else "—",
+                help="Collateral value divided by requested loan amount.",
+            )
+            assessment_top[2].metric(
                 "Bureau score",
                 bureau.get("bureau_score", "—"),
                 help="Credit-bureau score used as one risk signal.",
             )
-            assessment_bottom = st.columns(2)
-            assessment_bottom[0].metric(
+            assessment_top[3].metric(
                 "Bounced instruments",
                 bank.get("total_bounced_instruments", "—"),
                 help="Count from the bank-statement analysis tool.",
-            )
-            assessment_bottom[1].metric(
-                "Policy citations",
-                len(result.get("policy_citations") or []),
-                help="Number of policy references attached to this assessment.",
             )
     with decision_card:
         with st.container(border=True):
@@ -352,19 +356,6 @@ def _render_underwriting_result(result: dict[str, Any], thread_id: str | None) -
                 "Risk grade",
                 draft.get("risk_grade", "—"),
                 help="Risk grade assigned by the analyst or deterministic review path.",
-            )
-            decision_bottom = st.columns(2)
-            amount = draft.get("recommended_amount_inr")
-            decision_bottom[0].metric(
-                "Recommended amount",
-                f"INR {float(amount):,.0f}" if isinstance(amount, (int, float)) else "—",
-                help="Amount recommended by the committee.",
-            )
-            rate = draft.get("proposed_interest_rate_pct")
-            decision_bottom[1].metric(
-                "Indicative rate",
-                f"{float(rate):.2f}%" if isinstance(rate, (int, float)) else "—",
-                help="Indicative interest rate in the draft recommendation.",
             )
     analyst_route = _route_label([str(flag) for flag in flags], "analyst")
     critic_route = _route_label([str(flag) for flag in flags], "critic")

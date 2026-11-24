@@ -63,12 +63,15 @@ paused approval to resume after the process is restarted.
 3. Demographic proxies are removed before financial scoring and committee work,
    including proxy references embedded in free-text narratives.
 4. Tool calculations and policy thresholds are deterministic Python checks.
-5. Verdict rationale is checked for protected/proxy language and rebuilt from
+5. DSCR is calculated only from an explicit application debt-service amount or
+   application interest rate. If neither basis is present, DSCR remains unavailable
+   and the case is routed for review; no indicative basis is fabricated.
+6. Verdict rationale is checked for protected/proxy language and rebuilt from
    sanitized financial facts plus valid policy citations so matched-pair
    applications receive identical rationale content.
-6. Borderline or above-threshold decisions require human sign-off through
+7. Borderline or above-threshold decisions require human sign-off through
    `interrupt()`; finalization happens only after the interrupt resumes.
-7. API guardrail failures return HTTP 422 with explicit `detail.flags` values.
+8. API guardrail failures return HTTP 422 with explicit `detail.flags` values.
 
 The guardrails are defense-in-depth. Prompt instructions alone are not treated
 as enforcement.
@@ -85,6 +88,8 @@ as enforcement.
 | Invalid citation, DSCR, or bias language | Critic rejects and sends work through the bounded revision path | Revision exhaustion escalates rather than silently approving |
 | Process termination during approval | SQLite checkpoint preserves the thread | The same `thread_id` must be supplied on resume |
 | Missing Qdrant collection | RAG query returns an explicit service error; underwriting retains MCP/core fallback behavior | The index must be built before policy QA |
+| Missing or inconsistent DSCR inputs | DSCR remains unavailable and the case is routed for review | A valid debt-service basis must be present |
+| LLM 429/503/provider outage | Classify the provider error, retry 503 once, stop 429 retries, and route to human review without exhausting graph revisions | A valid provider key/quota is still required for full LLM evaluation |
 
 ## Evaluation summary
 
@@ -108,7 +113,7 @@ score.
   failures remain fail-safe and are surfaced as guardrail flags.
 - Local trace export and deterministic fault-injection artifacts are included;
   remote Langfuse export remains optional and requires deployment credentials.
-- The LLM judge requires a real candidate-output run with provider credentials.
+- The committee LLM defaults to Gemini Flash Lite Latest. Full LLM evaluation requires provider availability and quota; 429/503 failures are shown to the user and routed for review.
 - Local Qdrant and SQLite paths are suitable for a demo, not horizontally
   scaled production deployment.
 - The generated policy corpus is synthetic and must be replaced and reviewed
@@ -119,7 +124,8 @@ score.
 For a local run, install `requirements.txt`, copy `.env.example` to `.env`,
 and start Uvicorn with `app:app`. Set `DATA_DIR`, `SQLITE_DB_PATH`, and
 `QDRANT_PATH` to writable mounted directories in a container or hosted
-service. Store provider keys in the deployment secret manager; never place
+service. Local Qdrant is single-process and must not be opened concurrently by
+multiple processes. Store provider keys in the deployment secret manager; never place
 them in source, committed `.env` files, evaluation outputs, or logs.
 
 Before deployment, run the test suite, build the Qdrant index, execute the

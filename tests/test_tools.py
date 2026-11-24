@@ -45,27 +45,19 @@ def test_derived_emi_and_multiple_policy_breaches(
     tools_module: ModuleType,
     mock_api_dir: Path,
 ) -> None:
-    """Verify EMI-derived debt service and breach flags on APP-1002."""
+    """Missing application rate does not create a fabricated DSCR basis."""
     result = invoke_tool(tools_module.calculate_dscr_and_ratios, application_id="app-1002")
 
     assert "error" not in result
-    assert result["proposed_debt_service_source"] == "underwriting_reference_emi_formula"
-    assert result["indicative_rate_pct"] == pytest.approx(12.0)
-    assert result["proposed_annual_debt_service_inr"] == pytest.approx(3519034.81, rel=1e-3)
+    assert result["proposed_debt_service_source"] == "missing_application_debt_service_basis"
+    assert result["proposed_annual_debt_service_inr"] is None
+    assert result["dscr"] is None
     assert result["meets_dscr_floor"] is False
     assert result["doc_mismatch"] is True
     assert result["fraud_hold"] is False
     assert result["max_tenor_months"] == 48
     assert result["tenor_above_limit"] is True
     assert result["collateral_shortfall"] is True
-    assert set(result["policy_flags"]) == {
-        "DSCR_BELOW_FLOOR",
-        "DOC_MISMATCH",
-        "TENOR_ABOVE_LIMIT",
-        "COLLATERAL_SHORTFALL",
-    }
-
-
 def test_fraud_hold_and_sector_cap_breach(
     tools_module: ModuleType,
     mock_api_dir: Path,
@@ -115,7 +107,6 @@ def test_zero_debt_service_does_not_divide_by_zero(
             "risk_grade",
             "requested_amount_inr",
             "requested_tenor_months",
-            "indicative_rate_pct",
             "ebitda_inr",
             "existing_annual_debt_service_inr",
             "proposed_annual_debt_service_inr",
@@ -130,7 +121,6 @@ def test_zero_debt_service_does_not_divide_by_zero(
                 "risk_grade": "A",
                 "requested_amount_inr": "0",
                 "requested_tenor_months": "12",
-                "indicative_rate_pct": "10.0",
                 "ebitda_inr": "5000000",
                 "existing_annual_debt_service_inr": "0",
                 "proposed_annual_debt_service_inr": "0",
