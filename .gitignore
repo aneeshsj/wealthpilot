@@ -6,8 +6,6 @@ __pycache__/
 *.sqlite
 qdrant_data/
 outputs/
-presentation_build/
-presentation_output/
 .codex/
 *.log
 .DS_Store
