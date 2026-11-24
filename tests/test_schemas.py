@@ -58,6 +58,13 @@ def test_loan_application_valid_and_strips_whitespace() -> None:
     assert not hasattr(app, "unexpected_extra_field")
 
 
+def test_loan_application_preserves_optional_supplied_dscr() -> None:
+    payload = _valid_application_payload()
+    payload["dscr"] = 1.73
+    app = LoanApplication.model_validate(payload)
+    assert app.dscr == pytest.approx(1.73)
+
+
 @pytest.mark.parametrize(
     ("field", "bad_value"),
     [

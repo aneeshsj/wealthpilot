@@ -137,6 +137,7 @@ class _RagPolicyScope(TypedDict):
 
 class _RiskScoringScope(TypedDict):
     application_id: str
+    raw_input: dict[str, Any] | str
     sanitized_app: dict[str, Any]
     guardrail_flags: list[str]
 
@@ -959,9 +960,38 @@ def rag_policy_node(state: UnderwritingState) -> dict[str, Any]:
 def _scope_risk_scoring(state: UnderwritingState) -> _RiskScoringScope:
     return {
         "application_id": state["application_id"],
+        "raw_input": state["raw_input"],
         "sanitized_app": dict(state.get("sanitized_app", {})),
         "guardrail_flags": list(state.get("guardrail_flags", [])),
     }
+
+
+def _extract_supplied_dscr(raw_input: dict[str, Any] | str) -> tuple[float | None, str | None]:
+    """Read a supplied DSCR from intake JSON without treating it as a calculation."""
+    try:
+        payload: Any = json.loads(raw_input) if isinstance(raw_input, str) else raw_input
+    except (TypeError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+
+    declared_financials = payload.get("declared_financials")
+    ground_truth = payload.get("ground_truth")
+    candidates = (
+        ("dscr", payload.get("dscr")),
+        ("declared_financials.dscr", declared_financials.get("dscr") if isinstance(declared_financials, dict) else None),
+        ("ground_truth.dscr", ground_truth.get("dscr") if isinstance(ground_truth, dict) else None),
+    )
+    for source, value in candidates:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if numeric == numeric and numeric not in {float("inf"), float("-inf")} and numeric >= 0.0:
+            return round(numeric, 4), f"input_json.{source}"
+    return None, None
 
 
 def risk_scoring_node(state: UnderwritingState) -> dict[str, Any]:
@@ -971,7 +1001,14 @@ def risk_scoring_node(state: UnderwritingState) -> dict[str, Any]:
     sanitized_app = scope["sanitized_app"]
     flags = list(scope["guardrail_flags"])
 
-    dscr_metrics = calculate_dscr_and_ratios.invoke({"application_id": app_id})
+    supplied_dscr, supplied_dscr_source = _extract_supplied_dscr(scope["raw_input"])
+    dscr_args: dict[str, Any] = {"application_id": app_id}
+    if supplied_dscr is not None:
+        dscr_args.update(
+            supplied_dscr=supplied_dscr,
+            supplied_dscr_source=supplied_dscr_source or "input_json.dscr",
+        )
+    dscr_metrics = calculate_dscr_and_ratios.invoke(dscr_args)
     applicant_id = str(
         dscr_metrics.get("applicant_id")
         or sanitized_app.get("applicant_id")

@@ -437,6 +437,39 @@ def test_risk_scoring_node_runs_deterministic_tools(isolated_env: Path) -> None:
     assert result["guardrail_flags"] == []
 
 
+def test_risk_scoring_node_passes_supplied_json_dscr_to_tool(
+    isolated_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def invoke(args: dict[str, Any]) -> dict[str, Any]:
+        calls.append(dict(args))
+        return {
+            "application_id": args["application_id"],
+            "applicant_id": "APL-2001",
+            "dscr": args.get("supplied_dscr"),
+            "dscr_source": args.get("supplied_dscr_source"),
+            "policy_flags": [],
+        }
+
+    monkeypatch.setattr(
+        graph_mod,
+        "calculate_dscr_and_ratios",
+        SimpleNamespace(name="calculate_dscr_and_ratios", invoke=invoke),
+    )
+    state = _base_state()
+    state["raw_input"] = {**state["raw_input"], "ground_truth": {"dscr": 1.73}}
+    result = risk_scoring_node(state)
+
+    assert calls == [{
+        "application_id": "APP-2026-001",
+        "supplied_dscr": 1.73,
+        "supplied_dscr_source": "input_json.ground_truth.dscr",
+    }]
+    assert result["dscr_metrics"]["dscr"] == pytest.approx(1.73)
+
+
 def test_risk_scoring_node_propagates_policy_flags_and_severe_delinquency(
     isolated_env: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -52,12 +52,29 @@ def test_derived_emi_and_multiple_policy_breaches(
     assert result["proposed_debt_service_source"] == "missing_application_debt_service_basis"
     assert result["proposed_annual_debt_service_inr"] is None
     assert result["dscr"] is None
+    assert result["dscr_source"] == "calculated_from_application_inputs"
     assert result["meets_dscr_floor"] is False
     assert result["doc_mismatch"] is True
     assert result["fraud_hold"] is False
     assert result["max_tenor_months"] == 48
     assert result["tenor_above_limit"] is True
     assert result["collateral_shortfall"] is True
+
+
+def test_supplied_dscr_is_consumed_without_recomputation(
+    tools_module: ModuleType,
+    mock_api_dir: Path,
+) -> None:
+    result = invoke_tool(
+        tools_module.calculate_dscr_and_ratios,
+        application_id="app-1002",
+        supplied_dscr=1.73,
+        supplied_dscr_source="input_json.ground_truth.dscr",
+    )
+
+    assert result["dscr"] == pytest.approx(1.73)
+    assert result["dscr_source"] == "input_json.ground_truth.dscr"
+    assert result["meets_dscr_floor"] is True
 def test_fraud_hold_and_sector_cap_breach(
     tools_module: ModuleType,
     mock_api_dir: Path,

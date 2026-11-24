@@ -269,7 +269,11 @@ def derive_risk_grade(*, dscr: Any, bureau_score: Any) -> str:
 
 
 @tool
-def calculate_dscr_and_ratios(application_id: str) -> dict[str, Any]:
+def calculate_dscr_and_ratios(
+    application_id: str,
+    supplied_dscr: float | None = None,
+    supplied_dscr_source: str = "input_json.dscr",
+) -> dict[str, Any]:
     """Calculate exact DSCR, financial ratios, and policy breach flags for an SME loan application.
 
     Use this tool when:
@@ -285,6 +289,9 @@ def calculate_dscr_and_ratios(application_id: str) -> dict[str, Any]:
 
     Args:
         application_id: Unique identifier of the loan application (e.g. ``"APP-1001"``).
+        supplied_dscr: Optional DSCR already supplied by intake JSON. When present,
+            it is consumed directly and not recomputed.
+        supplied_dscr_source: Audit label identifying the supplied DSCR field.
 
     Returns:
         Structured dictionary containing computed DSCR, debt service figures,
@@ -387,11 +394,20 @@ def calculate_dscr_and_ratios(application_id: str) -> dict[str, Any]:
         if proposed_annual_debt_service_inr is not None
         else None
     )
-    dscr: float | None = (
+    calculated_dscr: float | None = (
         round(ebitda_inr / total_annual_debt_service_inr, 4)
         if total_annual_debt_service_inr is not None and total_annual_debt_service_inr > 0.0
         else None
     )
+    if supplied_dscr is not None:
+        supplied_dscr_value = _to_float(supplied_dscr, default=-1.0)
+        if supplied_dscr_value < 0.0:
+            return {"error": "Supplied DSCR must be a finite non-negative number"}
+        dscr: float | None = round(supplied_dscr_value, 4)
+        dscr_source = supplied_dscr_source or "input_json.dscr"
+    else:
+        dscr = calculated_dscr
+        dscr_source = "calculated_from_application_inputs"
 
     dscr_floor = _to_float(
         _get_first_value(sector_row, ("dscr_floor", "min_dscr")) if sector_row else "",
@@ -535,6 +551,7 @@ def calculate_dscr_and_ratios(application_id: str) -> dict[str, Any]:
         ),
         "proposed_debt_service_source": proposed_debt_service_source,
         "dscr": dscr,
+        "dscr_source": dscr_source,
         "dscr_floor": round(dscr_floor, 4),
         "meets_dscr_floor": meets_dscr_floor,
         "revenue_variance_pct": revenue_variance_pct,

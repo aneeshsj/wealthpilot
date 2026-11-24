@@ -191,6 +191,7 @@ class LoanApplication(BaseModel):
     requested_amount_inr: float
     requested_tenor_months: int
     declared_annual_revenue_inr: float
+    dscr: float | None = None
     existing_annual_debt_service_inr: float = 0.0
     current_assets_inr: float = 0.0
     current_liabilities_inr: float = 0.0
@@ -299,6 +300,11 @@ class LoanApplication(BaseModel):
         )
         for field_name in numeric_fields:
             _ensure_finite(getattr(self, field_name), field_name, errors)
+
+        if self.dscr is not None:
+            _ensure_finite(self.dscr, "dscr", errors)
+            if self.dscr < 0:
+                errors.append(f"dscr must be non-negative (>= 0), got {self.dscr}")
 
         if self.requested_amount_inr <= 0:
             errors.append(
