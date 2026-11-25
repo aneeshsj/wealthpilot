@@ -14,7 +14,14 @@ from typing import Any, Literal, Sequence
 
 import litellm
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 from rank_bm25 import BM25Okapi
 
 from src.guardrails import scan_for_injection
@@ -49,6 +56,29 @@ _DEFAULT_FINAL_TOP_K = 4
 _DEFAULT_LLM_TEMPERATURE = 0.0
 _DEFAULT_LLM_MAX_TOKENS = 1024
 _DEFAULT_EMBEDDING_BATCH_SIZE = 32
+
+_SECTOR_ALIASES = {
+    "auto components": "auto-components",
+    "auto-components": "auto-components",
+    "auto_components": "auto-components",
+    "food processing": "food-processing",
+    "food-processing": "food-processing",
+    "food_processing": "food-processing",
+    "it services": "it-services",
+    "it-services": "it-services",
+    "it_services": "it-services",
+    "light engineering": "light-engineering",
+    "light-engineering": "light-engineering",
+    "light_engineering": "light-engineering",
+    "pharma packaging": "pharma-packaging",
+    "pharma-packaging": "pharma-packaging",
+    "pharma_packaging": "pharma-packaging",
+    "retail trade": "retail-trade",
+    "retail-trade": "retail-trade",
+    "retail_trade": "retail-trade",
+    "textiles": "textiles",
+    "logistics": "logistics",
+}
 
 _TOKEN_PATTERN = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*")
 _MD_HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -139,6 +169,8 @@ class PolicyChunk:
     source_type: SourceType
     file_path: str
     chunk_index: int
+    policy_scope: str = "core"
+    sector_id: str | None = None
 
     @property
     def citation(self) -> str:
@@ -165,6 +197,8 @@ class RetrievedChunk:
     sparse_rank: int | None
     rrf_score: float
     rerank_score: float
+    policy_scope: str = "core"
+    sector_id: str | None = None
 
     @property
     def citation(self) -> str:
@@ -284,6 +318,27 @@ def _format_title_from_stem(stem: str) -> str:
     """Convert a filename stem into a readable policy document title."""
     cleaned = re.sub(r"[_\-]+", " ", stem).strip()
     return re.sub(r"\s+", " ", cleaned).title() if cleaned else stem
+
+
+def normalize_sector_id(value: str | None) -> str | None:
+    """Return the canonical sector identifier used by policy retrieval."""
+    if not value:
+        return None
+    cleaned = re.sub(r"\s+", " ", str(value).strip().lower())
+    return _SECTOR_ALIASES.get(cleaned, cleaned.replace(" ", "-"))
+
+
+def _policy_metadata(file_path: str, doc_title: str = "") -> tuple[str, str | None]:
+    """Derive stable scope metadata from policy document provenance."""
+    stem = Path(file_path).stem.lower()
+    if stem.startswith("sector-"):
+        return "sector", normalize_sector_id(stem.removeprefix("sector-"))
+    title_match = re.search(
+        r"sector\s+underwriting\s+note\s*:\s*(.+)", doc_title, re.I
+    )
+    if title_match:
+        return "sector", normalize_sector_id(title_match.group(1))
+    return "core", None
 
 
 def _make_chunk_id(file_path: str, section: str, chunk_index: int) -> str:
@@ -413,6 +468,8 @@ def _chunk_markdown_document(
                     source_type="markdown",
                     file_path=rel_path,
                     chunk_index=chunk_idx,
+                    policy_scope=_policy_metadata(rel_path, resolved_title)[0],
+                    sector_id=_policy_metadata(rel_path, resolved_title)[1],
                 )
             )
             chunk_idx += 1
@@ -544,6 +601,8 @@ def _chunk_pdf_document(
                     source_type="pdf",
                     file_path=rel_path,
                     chunk_index=chunk_idx,
+                    policy_scope=_policy_metadata(rel_path, doc_title)[0],
+                    sector_id=_policy_metadata(rel_path, doc_title)[1],
                 )
             )
             chunk_idx += 1
@@ -764,6 +823,8 @@ def _load_chunks_and_bm25(
                     source_type=payload["source_type"],
                     file_path=str(payload["file_path"]),
                     chunk_index=int(payload["chunk_index"]),
+                    policy_scope=str(payload.get("policy_scope") or _policy_metadata(str(payload["file_path"]), str(payload.get("doc_title") or ""))[0]),
+                    sector_id=payload.get("sector_id") or _policy_metadata(str(payload["file_path"]), str(payload.get("doc_title") or ""))[1],
                 )
             )
         if next_offset is None:
@@ -903,15 +964,31 @@ def _dense_search(
     collection_name: str,
     query_vector: list[float],
     limit: int,
+    sector_id: str | None = None,
 ) -> list[tuple[PolicyChunk, int]]:
     """Run dense vector search against Qdrant and return 1-based ranked chunks."""
+    query_filter = (
+        Filter(must=[FieldCondition(key="sector_id", match=MatchValue(value=sector_id))])
+        if sector_id
+        else None
+    )
     if hasattr(client, "query_points"):
-        response = client.query_points(
-            collection_name=collection_name,
-            query=query_vector,
-            limit=limit,
-            with_payload=True,
-        )
+        try:
+            response = client.query_points(
+                collection_name=collection_name,
+                query=query_vector,
+                limit=limit,
+                with_payload=True,
+                query_filter=query_filter,
+            )
+        except TypeError:
+            # Compatibility with older Qdrant clients and lightweight test doubles.
+            response = client.query_points(
+                collection_name=collection_name,
+                query=query_vector,
+                limit=limit,
+                with_payload=True,
+            )
         hits = response.points
     else:  # pragma: no cover - compatibility with older qdrant-client versions
         hits = client.search(
@@ -932,6 +1009,8 @@ def _dense_search(
             source_type=payload["source_type"],
             file_path=str(payload["file_path"]),
             chunk_index=int(payload["chunk_index"]),
+            policy_scope=str(payload.get("policy_scope") or _policy_metadata(str(payload["file_path"]), str(payload.get("doc_title") or ""))[0]),
+            sector_id=payload.get("sector_id") or _policy_metadata(str(payload["file_path"]), str(payload.get("doc_title") or ""))[1],
         )
         ranked.append((chunk, rank))
     return ranked
@@ -967,6 +1046,8 @@ def retrieve_policy(
     top_k: int | None = None,
     qdrant_path: Path | str | None = None,
     collection_name: str | None = None,
+    sector_id: str | None = None,
+    max_documents: int | None = None,
 ) -> list[RetrievedChunk]:
     """Retrieve and rerank policy chunks via Dense + BM25 + RRF + CrossEncoder.
 
@@ -979,6 +1060,7 @@ def retrieve_policy(
     cleaned_query = query.strip()
     if not cleaned_query:
         return []
+    normalized_sector_id = normalize_sector_id(sector_id)
 
     resolved_qdrant_path = (
         Path(qdrant_path) if qdrant_path is not None else Path(settings.QDRANT_PATH)
@@ -1004,10 +1086,17 @@ def retrieve_policy(
         index_meta["embedding_backend"] if index_meta else None
     )
 
-    query_vectors, _, _ = _embed_texts(
-        [cleaned_query], preferred_provider=preferred_provider
-    )
-    query_vector = query_vectors[0]
+    query_vector: list[float] | None = None
+    try:
+        query_vectors, _, _ = _embed_texts(
+            [cleaned_query], preferred_provider=preferred_provider
+        )
+        query_vector = query_vectors[0]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Dense policy retrieval unavailable; continuing with deterministic BM25 fallback: %s",
+            exc,
+        )
 
     dense_top_k = _setting_int("DENSE_TOP_K", "DENSE_TOP_K", _DEFAULT_DENSE_TOP_K)
     sparse_top_k = _setting_int("SPARSE_TOP_K", "SPARSE_TOP_K", _DEFAULT_SPARSE_TOP_K)
@@ -1021,12 +1110,29 @@ def retrieve_policy(
         "RERANKER_MODEL", "RERANKER_MODEL", _DEFAULT_RERANKER_MODEL
     )
 
-    dense_results = _dense_search(
-        client=client,
-        collection_name=resolved_collection,
-        query_vector=query_vector,
-        limit=dense_top_k,
-    )
+    dense_results: list[tuple[PolicyChunk, int]] = []
+    if query_vector is not None:
+        dense_results = _dense_search(
+            client=client,
+            collection_name=resolved_collection,
+            query_vector=query_vector,
+            limit=dense_top_k,
+            sector_id=normalized_sector_id,
+        )
+        if normalized_sector_id and not dense_results:
+            # Permit a zero-downtime transition from indexes built before sector metadata.
+            dense_results = _dense_search(
+                client=client,
+                collection_name=resolved_collection,
+                query_vector=query_vector,
+                limit=dense_top_k,
+            )
+    if normalized_sector_id:
+        dense_results = [
+            (chunk, rank)
+            for chunk, rank in dense_results
+            if chunk.sector_id == normalized_sector_id
+        ]
 
     bm25, corpus_chunks = _load_chunks_and_bm25(
         client=client,
@@ -1039,6 +1145,12 @@ def retrieve_policy(
         query=cleaned_query,
         limit=sparse_top_k,
     )
+    if normalized_sector_id:
+        sparse_results = [
+            (chunk, rank)
+            for chunk, rank in sparse_results
+            if chunk.sector_id == normalized_sector_id
+        ]
 
     chunk_by_id: dict[str, PolicyChunk] = {}
     dense_ranks: dict[str, int] = {}
@@ -1074,9 +1186,16 @@ def retrieve_policy(
 
     fused_chunks = [chunk_by_id[cid] for cid in fused_ids]
 
-    reranker = _get_reranker(reranker_model)
-    pairs = [(cleaned_query, chunk.text) for chunk in fused_chunks]
-    raw_scores = reranker.predict(pairs)
+    try:
+        reranker = _get_reranker(reranker_model)
+        pairs = [(cleaned_query, chunk.text) for chunk in fused_chunks]
+        raw_scores = reranker.predict(pairs)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Cross-encoder reranking unavailable; using deterministic RRF order: %s",
+            exc,
+        )
+        raw_scores = [0.0] * len(fused_chunks)
 
     reranked: list[RetrievedChunk] = []
     for chunk, score in zip(fused_chunks, raw_scores, strict=True):
@@ -1093,11 +1212,35 @@ def retrieve_policy(
                 sparse_rank=sparse_ranks.get(chunk.chunk_id),
                 rrf_score=rrf_scores[chunk.chunk_id],
                 rerank_score=float(score),
+                policy_scope=chunk.policy_scope,
+                sector_id=chunk.sector_id,
             )
         )
 
     reranked.sort(key=lambda item: (-item.rerank_score, -item.rrf_score, item.chunk_id))
     top_chunks = reranked[:final_top_k]
+    if max_documents is not None and max_documents > 0:
+        selected_documents: list[str] = []
+        allowed_documents: set[str] = set()
+        for chunk in reranked:
+            document_key = chunk.doc_title.strip().lower()
+            if document_key not in allowed_documents:
+                if len(selected_documents) >= max_documents:
+                    continue
+                selected_documents.append(document_key)
+                allowed_documents.add(document_key)
+        top_chunks = [
+            chunk for chunk in top_chunks
+            if chunk.doc_title.strip().lower() in allowed_documents
+        ]
+        # Prefer the best-ranked single document if the top-k boundary split
+        # across several documents.
+        if selected_documents:
+            first_document = selected_documents[0]
+            top_chunks = [
+                chunk for chunk in top_chunks
+                if chunk.doc_title.strip().lower() == first_document
+            ]
 
     logger.debug(
         "Retrieved %d chunks (dense=%d, sparse=%d, fused=%d) for query %r; top citation=%s.",

@@ -36,7 +36,7 @@ try:
         scan_for_injection,
         validate_output_guardrails,
     )
-    from src.rag import RetrievedChunk, retrieve_policy
+    from src.rag import RetrievedChunk, normalize_sector_id, retrieve_policy
     from src.tools import (
         analyze_bank_statements,
         calculate_dscr_and_ratios,
@@ -57,7 +57,7 @@ except ImportError:  # pragma: no cover - supports running with src/ on sys.path
         scan_for_injection,
         validate_output_guardrails,
     )
-    from rag import RetrievedChunk, retrieve_policy  # type: ignore[no-redef]
+    from rag import RetrievedChunk, normalize_sector_id, retrieve_policy  # type: ignore[no-redef]
     from tools import (  # type: ignore[no-redef]
         analyze_bank_statements,
         calculate_dscr_and_ratios,
@@ -440,7 +440,35 @@ def _normalize_policy_entry(
     entry["citation"] = citation
     entry["rule_id"] = rule_id
     entry.setdefault("source", source_bucket)
+    if source_bucket not in {"core", "mcp_resource"} and not entry.get("sector_id"):
+        entry["policy_scope"] = "sector"
+        entry["sector_id"] = normalize_sector_id(str(source_bucket))
+    else:
+        entry.setdefault("policy_scope", "core")
+        entry.setdefault("sector_id", None)
     return entry
+
+
+def _sector_safe_policy_entries(
+    entries: list[dict[str, Any]], selected_sector: str
+) -> list[dict[str, Any]]:
+    """Keep only policy evidence applicable to the selected sector."""
+    sector_id = normalize_sector_id(selected_sector)
+    safe: list[dict[str, Any]] = []
+    for entry in entries:
+        entry_scope = entry.get("policy_scope")
+        if not entry_scope and entry.get("source") not in {None, "core", "mcp_resource"}:
+            entry_scope = "sector"
+        entry_sector = normalize_sector_id(str(entry.get("sector_id") or ""))
+        if entry_scope == "sector" and not entry_sector:
+            entry_sector = normalize_sector_id(str(entry.get("source") or ""))
+        if entry_scope == "sector" and entry_sector != sector_id:
+            continue
+        if entry_scope == "sector" and entry_sector == sector_id:
+            safe.append(entry)
+        elif entry_scope != "sector":
+            safe.append(entry)
+    return safe
 
 
 def _format_untrusted_policy_context(policy_citations: list[dict[str, Any]]) -> str:
@@ -538,12 +566,25 @@ def _rag_policy_lookup_tool(sector: str, requested_amount_inr: float) -> dict[st
     sector_raw: list[RetrievedChunk | dict[str, Any]] = []
 
     try:
-        core_raw = list(retrieve_policy(query=core_query))
+        try:
+            core_raw = list(retrieve_policy(query=core_query, max_documents=1))
+        except TypeError:
+            core_raw = list(retrieve_policy(query=core_query))
     except Exception as exc:  # noqa: BLE001
         logger.warning("Core RAG policy retrieval failed (%s).", exc)
 
     try:
-        sector_raw = list(retrieve_policy(query=sector_query))
+        try:
+            sector_raw = list(
+                retrieve_policy(
+                    query=sector_query,
+                    sector_id=normalize_sector_id(sector),
+                    max_documents=1,
+                )
+            )
+        except TypeError:
+            # Compatibility with older injected retrieval adapters.
+            sector_raw = list(retrieve_policy(query=sector_query))
     except Exception as exc:  # noqa: BLE001
         logger.warning("Sector RAG policy retrieval failed for sector=%s (%s).", sector, exc)
 
@@ -581,12 +622,26 @@ def _analyst_verify_dscr_tool(
 
 @tool("verify_policy_citations")
 def _critic_verify_citations_tool(
-    cited_rule_ids: list[str], policy_citations: list[dict[str, Any]]
+    cited_rule_ids: list[str],
+    policy_citations: list[dict[str, Any]],
+    selected_sector: str | None = None,
 ) -> dict[str, Any]:
     """Check whether all cited [doc_title | section] or rule IDs exist in policy citations."""
     available_ids: set[str] = set()
     canonical_citations: set[str] = set()
+    selected_sector_id = normalize_sector_id(selected_sector)
     for item in policy_citations:
+        item_sector_id = normalize_sector_id(str(item.get("sector_id") or ""))
+        item_scope = item.get("policy_scope")
+        if not item_scope and item.get("source") not in {None, "core", "mcp_resource"}:
+            item_scope = "sector"
+            item_sector_id = item_sector_id or normalize_sector_id(str(item.get("source") or ""))
+        if (
+            selected_sector_id
+            and item_scope == "sector"
+            and item_sector_id != selected_sector_id
+        ):
+            continue
         for key in ("citation", "rule_id", "id", "chunk_id"):
             val = str(item.get(key) or "").strip()
             if val:
@@ -656,9 +711,11 @@ def _deterministic_analyst_fallback(scope: _AnalystScope) -> DraftVerdictOutput:
     """Rule-based underwriting fallback when the analyst LLM is unavailable."""
     dscr = _safe_float(scope["dscr_metrics"].get("dscr"), default=0.0)
     bureau_score = int(_safe_float(scope["bureau_data"].get("bureau_score"), default=0.0))
+    sector = str(scope["sanitized_app"].get("sector") or "")
+    safe_citations = _sector_safe_policy_entries(scope["policy_citations"], sector)
     citation_ids = [
         str(c.get("citation") or c.get("rule_id") or c.get("id") or c.get("chunk_id"))
-        for c in scope["policy_citations"]
+        for c in safe_citations
         if c.get("citation") or c.get("rule_id") or c.get("id") or c.get("chunk_id")
     ][:3]
 
@@ -698,9 +755,26 @@ def _deterministic_analyst_fallback(scope: _AnalystScope) -> DraftVerdictOutput:
 
 def _canonicalize_verdict(scope: _AnalystScope, verdict: DraftVerdictOutput) -> DraftVerdictOutput:
     """Make the final rationale depend only on non-proxy facts and valid citations."""
+    sector = str(scope["sanitized_app"].get("sector") or "")
+    safe_citations = _sector_safe_policy_entries(scope["policy_citations"], sector)
+    sector_id = normalize_sector_id(sector)
+    has_sector_policy = any(
+        (
+            c.get("policy_scope") == "sector"
+            or (
+                not c.get("policy_scope")
+                and c.get("source") not in {None, "core", "mcp_resource"}
+            )
+        )
+        and (
+            normalize_sector_id(str(c.get("sector_id") or ""))
+            or normalize_sector_id(str(c.get("source") or ""))
+        ) == sector_id
+        for c in safe_citations
+    )
     valid_citations = [
         str(c.get("citation") or c.get("rule_id"))
-        for c in scope["policy_citations"]
+        for c in safe_citations
         if c.get("citation") or c.get("rule_id")
     ][:3]
     dscr = _safe_float(scope["dscr_metrics"].get("dscr"), default=0.0)
@@ -711,6 +785,13 @@ def _canonicalize_verdict(scope: _AnalystScope, verdict: DraftVerdictOutput) -> 
     )
     if flags:
         rationale += f" Review flags: {', '.join(sorted(set(flags)))}."
+    if sector_id and not has_sector_policy:
+        verdict.decision = "borderline"
+        verdict.risk_grade = "UNAVAILABLE"
+        verdict.conditions = list(verdict.conditions) + [
+            f"Validated policy evidence for sector '{sector}' is unavailable; manual credit review required."
+        ]
+        rationale += f" Validated policy evidence for sector '{sector}' is unavailable; manual credit review is required."
     if valid_citations:
         rationale += " Supporting policy sources: " + ", ".join(valid_citations) + "."
     verdict.rationale = rationale
@@ -727,6 +808,7 @@ def _deterministic_critic_checks(scope: _CriticScope) -> dict[str, Any]:
         {
             "cited_rule_ids": cited_ids,
             "policy_citations": scope["policy_citations"],
+            "selected_sector": str(scope["sanitized_app"].get("sector") or ""),
         }
     )
 
@@ -937,6 +1019,14 @@ def rag_policy_node(state: UnderwritingState) -> dict[str, Any]:
             seen_keys.add(dedupe_key)
             citations.append(summary_entry)
 
+    citations = _sector_safe_policy_entries(citations, sector)
+    sector_id = normalize_sector_id(sector)
+    if sector_id and not any(
+        item.get("policy_scope") == "sector"
+        and normalize_sector_id(str(item.get("sector_id") or "")) == sector_id
+        for item in citations
+    ):
+        retrieval_flags.append("sector_policy_unavailable")
     logger.info(
         "Retrieved %d policy citations for application_id=%s sector=%s",
         len(citations),
@@ -1522,6 +1612,7 @@ def _write_past_decision(
                 sector TEXT NOT NULL,
                 requested_amount_inr REAL NOT NULL,
                 decision TEXT NOT NULL,
+                recommended_amount_inr REAL NOT NULL DEFAULT 0,
                 dscr REAL NOT NULL,
                 bureau_score INTEGER NOT NULL,
                 rationale TEXT NOT NULL,
@@ -1536,6 +1627,15 @@ def _write_past_decision(
             )
             """
         )
+        existing_columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(past_decisions)").fetchall()
+        }
+        if "recommended_amount_inr" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE past_decisions "
+                "ADD COLUMN recommended_amount_inr REAL NOT NULL DEFAULT 0"
+            )
         conn.execute(
             """
             INSERT INTO past_decisions (
@@ -1543,6 +1643,7 @@ def _write_past_decision(
                 sector,
                 requested_amount_inr,
                 decision,
+                recommended_amount_inr,
                 dscr,
                 bureau_score,
                 rationale,
@@ -1554,11 +1655,12 @@ def _write_past_decision(
                 audit_trail_json,
                 created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(application_id) DO UPDATE SET
                 sector = excluded.sector,
                 requested_amount_inr = excluded.requested_amount_inr,
                 decision = excluded.decision,
+                recommended_amount_inr = excluded.recommended_amount_inr,
                 dscr = excluded.dscr,
                 bureau_score = excluded.bureau_score,
                 rationale = excluded.rationale,
@@ -1575,6 +1677,7 @@ def _write_past_decision(
                 record["sector"],
                 record["requested_amount_inr"],
                 record["decision"],
+                record["recommended_amount_inr"],
                 record["dscr"],
                 record["bureau_score"],
                 record["rationale"],
@@ -1602,6 +1705,10 @@ def finalize_decision_node(state: UnderwritingState) -> dict[str, Any]:
     sector = str(scope["sanitized_app"].get("sector") or "unknown")
     dscr_val = _safe_float(scope["dscr_metrics"].get("dscr"), default=0.0)
     bureau_score = int(_safe_float(scope["bureau_data"].get("bureau_score"), default=0.0))
+    recommended_amt = _safe_float(
+        final_verdict.get("recommended_amount_inr"),
+        default=requested_amt if decision_str == "approve" else 0.0,
+    )
     rationale = str(final_verdict.get("rationale", ""))
     final_audit_line = _audit_entry(
         "finalize_decision_node",
@@ -1613,6 +1720,7 @@ def finalize_decision_node(state: UnderwritingState) -> dict[str, Any]:
         "sector": sector,
         "requested_amount_inr": requested_amt,
         "decision": decision_str,
+        "recommended_amount_inr": recommended_amt,
         "dscr": dscr_val,
         "bureau_score": bureau_score,
         "rationale": rationale,

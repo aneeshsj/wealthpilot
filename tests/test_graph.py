@@ -420,6 +420,32 @@ def test_rag_policy_node_survives_missing_qdrant_index_via_mcp_fallback(
     assert citations == {"[MCP Governance Policy | Board Resolution]"}
 
 
+def test_sector_policy_evidence_is_filtered_before_finalization() -> None:
+    entries = [
+        {
+            "citation": "[Sector Underwriting Note: Auto Components | DSCR]",
+            "rule_id": "auto-dscr",
+            "policy_scope": "sector",
+            "sector_id": "auto-components",
+        },
+        {
+            "citation": "[Sector Underwriting Note: Textiles | DSCR]",
+            "rule_id": "textile-dscr",
+            "policy_scope": "sector",
+            "sector_id": "textiles",
+        },
+        {
+            "citation": "[Core Credit Policy | DSCR]",
+            "rule_id": "core-dscr",
+            "policy_scope": "core",
+        },
+    ]
+
+    safe = graph_mod._sector_safe_policy_entries(entries, "Auto Components")
+
+    assert {entry["rule_id"] for entry in safe} == {"auto-dscr", "core-dscr"}
+
+
 def test_risk_scoring_node_runs_deterministic_tools(isolated_env: Path) -> None:
     state = _base_state()
     state["dscr_metrics"] = {}
@@ -655,12 +681,12 @@ def test_finalize_decision_node_writes_sqlite_past_decisions(
 
     with sqlite3.connect(isolated_env) as conn:
         row = conn.execute(
-            "SELECT application_id, sector, decision, dscr, bureau_score, human_approved "
+            "SELECT application_id, sector, decision, recommended_amount_inr, dscr, bureau_score, human_approved "
             "FROM past_decisions WHERE application_id = ?",
             ("APP-2026-001",),
         ).fetchone()
 
-    assert row == ("APP-2026-001", "manufacturing", "approve", 1.65, 765, 1)
+    assert row == ("APP-2026-001", "manufacturing", "approve", 2_500_000.0, 1.65, 765, 1)
 
 
 # ---------------------------------------------------------------------------
